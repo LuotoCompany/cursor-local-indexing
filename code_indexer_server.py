@@ -7,9 +7,9 @@ import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 from tree_sitter_language_pack import get_parser
-from fastapi import FastAPI
+import asyncio
+from fastmcp import FastMCP
 from contextlib import asynccontextmanager
-import uvicorn
 
 # Import LlamaIndex components
 try:
@@ -45,6 +45,33 @@ DEFAULT_IGNORE_DIRS = {
     ".ipynb_checkpoints"
 }
 
+# Default files to ignore
+DEFAULT_IGNORE_FILES = {
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "Pipfile.lock",
+    "Gemfile.lock",
+    "composer.lock",
+    ".DS_Store",
+    ".env",
+    ".env.local",
+    ".env.development",
+    ".env.test",
+    ".env.production",
+    "*.pyc",
+    "*.pyo",
+    "*.pyd",
+    "*.so",
+    "*.dll",
+    "*.dylib",
+    ".coverage",
+    "coverage.xml",
+    ".eslintcache",
+    ".tsbuildinfo"
+}
+
 # Default file extensions to include
 DEFAULT_FILE_EXTENSIONS = {
     ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".c", ".cpp", ".h", ".hpp",
@@ -52,40 +79,11 @@ DEFAULT_FILE_EXTENSIONS = {
     ".html", ".css", ".sql", ".md", ".json", ".yaml", ".yml", ".toml"
 }
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Initialize and cleanup resources."""
-    global config, chroma_client, embedding_function
-
-    # Get configuration from environment
-    config = get_config_from_env()
-
-    # Initialize ChromaDB client with telemetry disabled
-    chroma_client = chromadb.PersistentClient(
-        path="chroma_db",
-        settings=Settings(anonymized_telemetry=False)
-    )
-
-    # Initialize embedding function
-    embedding_function = (
-        embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2"
-        )
-    )
-
-    # Start indexing in background
-    asyncio.create_task(index_projects())
-
-    yield
-
-# Initialize FastAPI app with lifespan
-app = FastAPI(title="Code Indexer Server", lifespan=lifespan)
-
-# Global variables to store configuration and state
+# Global variables
 config = None
 chroma_client = None
 embedding_function = None
+mcp = FastMCP(title="Code Indexer Server")
 
 
 def get_config_from_env():
@@ -106,17 +104,85 @@ def get_config_from_env():
     }
 
 
+async def initialize_chromadb():
+    """Initialize ChromaDB and embedding function asynchronously."""
+    global config, chroma_client, embedding_function
+
+    try:
+        # Get configuration from environment
+        config = get_config_from_env()
+        logger.info("Configuration loaded successfully")
+
+        # Initialize ChromaDB client with telemetry disabled
+        chroma_client = chromadb.PersistentClient(
+            path="chroma_db",
+            settings=Settings(anonymized_telemetry=False)
+        )
+        logger.info("ChromaDB client initialized")
+
+        # Initialize embedding function
+        embedding_function = (
+            embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name="all-MiniLM-L6-v2"
+            )
+        )
+        logger.info("Embedding function initialized")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error during initialization: {e}")
+        # Still need to assign default values to global variables
+        if config is None:
+            config = {"projects_root": "", "folders_to_index": [""]}
+        if chroma_client is None:
+            # Create an empty client as a fallback
+            try:
+                chroma_client = chromadb.PersistentClient(path="chroma_db")
+            except Exception as db_err:
+                logger.error(
+                    f"Failed to create fallback ChromaDB client: {db_err}"
+                )
+        if embedding_function is None:
+            try:
+                embedding_function = (
+                    embedding_functions.SentenceTransformerEmbeddingFunction(
+                        model_name="all-MiniLM-L6-v2"
+                    )
+                )
+            except Exception as embed_err:
+                logger.error(
+                    f"Failed to create fallback embedding function: "
+                    f"{embed_err}"
+                )
+        return False
+
+
 def is_valid_file(
     file_path: str,
     ignore_dirs: Set[str],
     file_extensions: Set[str]
 ) -> bool:
     """Check if a file should be processed based on its path and extension."""
+    # Check if path contains ignored directory
     parts = file_path.split(os.path.sep)
     for part in parts:
         if part in ignore_dirs:
             return False
 
+    # Get file name and check against ignored files
+    file_name = os.path.basename(file_path)
+
+    # Check exact matches
+    if file_name in DEFAULT_IGNORE_FILES:
+        return False
+
+    # Check wildcard patterns
+    for pattern in DEFAULT_IGNORE_FILES:
+        if pattern.startswith("*"):
+            if file_name.endswith(pattern[1:]):
+                return False
+
+    # Check file extension
     _, ext = os.path.splitext(file_path)
     return ext.lower() in file_extensions if file_extensions else True
 
@@ -138,20 +204,27 @@ def load_documents(
             ]
 
             for file in files:
-                file_path = os.path.join(root, file)
-                if is_valid_file(file_path, ignore_dirs, file_extensions):
-                    all_files.append(file_path)
+                abs_file_path = os.path.join(root, file)
+                if is_valid_file(abs_file_path, ignore_dirs, file_extensions):
+                    # Calculate relative path from the directory being indexed
+                    rel_file_path = os.path.relpath(abs_file_path, directory)
+                    all_files.append((abs_file_path, rel_file_path))
 
         if not all_files:
             logger.warning(f"No valid files found in {directory}")
             return []
 
-        # Load the filtered files
+        # Load the filtered files using absolute paths for reading
         reader = SimpleDirectoryReader(
-            input_files=all_files,
+            input_files=[abs_path for abs_path, _ in all_files],
             exclude_hidden=True
         )
         documents = reader.load_data()
+
+        # Update the metadata to use relative paths
+        for doc, (_, rel_path) in zip(documents, all_files):
+            doc.metadata["file_path"] = rel_path
+
         logger.info(f"Loaded {len(documents)} documents from {directory}")
         return documents
     except Exception as e:
@@ -393,30 +466,53 @@ async def index_projects():
             await asyncio.sleep(60)  # Wait a minute before retrying
 
 
-@app.get("/status")
-async def get_status():
-    """Get the current status of the indexing process."""
-    return {
-        "config": config if config else None
-    }
-
-
-@app.get("/search")
-async def search_code(query: str, project: str, n_results: int = 5, threshold: float = 30.0):
-    """Search code using natural language queries.
-
-    Args:
-        query: Natural language query about the codebase
-        project: Collection/folder name to search in
-        n_results: Number of results to return (default: 5)
-        threshold: Minimum relevance percentage to include results (default: 30.0)
+@mcp.tool(
+    name="search_code",
+    description="""Search code using natural language queries.
+        Args:
+            query: Natural language query about the codebase
+            project: Collection/folder name to search in. Use the current workspace name.
+            n_results: Number of results to return (default: 5)
+            threshold: Minimum relevance percentage to include results 
+                (default: 30.0)
     """
+)
+async def search_code(
+    query: str,
+    project: str,
+    n_results: int = 5,
+    threshold: float = 30.0
+):
     try:
-        # Get the collection
-        collection = chroma_client.get_collection(
-            name=project,
-            embedding_function=embedding_function
-        )
+        if not chroma_client:
+            logger.error("ChromaDB client not initialized")
+            return {
+                "error": "ChromaDB client not initialized",
+                "results": [],
+                "total_results": 0
+            }
+
+        if not embedding_function:
+            logger.error("Embedding function not initialized")
+            return {
+                "error": "Embedding function not initialized",
+                "results": [],
+                "total_results": 0
+            }
+
+        # Check if collection exists
+        try:
+            collection = chroma_client.get_collection(
+                name=project,
+                embedding_function=embedding_function
+            )
+        except Exception as e:
+            logger.error(f"Collection {project} not found: {e}")
+            return {
+                "error": f"Collection {project} not found",
+                "results": [],
+                "total_results": 0
+            }
 
         # Perform the search
         results = collection.query(
@@ -426,8 +522,13 @@ async def search_code(query: str, project: str, n_results: int = 5, threshold: f
         )
 
         # Filter results by threshold
-        if not results or not results["documents"] or not results["documents"][0]:
-            return {"error": "No results found"}
+        if (not results or not results["documents"] 
+                or not results["documents"][0]):
+            return {
+                "error": "No results found",
+                "results": [],
+                "total_results": 0
+            }
 
         filtered_docs = []
         filtered_metadatas = []
@@ -449,7 +550,9 @@ async def search_code(query: str, project: str, n_results: int = 5, threshold: f
 
         # Format results
         formatted_results = []
-        for doc, meta, distance in zip(filtered_docs, filtered_metadatas, filtered_distances):
+        for doc, meta, distance in zip(
+            filtered_docs, filtered_metadatas, filtered_distances
+        ):
             score = (1 - distance) * 100
             formatted_results.append({
                 "text": doc,
@@ -466,8 +569,25 @@ async def search_code(query: str, project: str, n_results: int = 5, threshold: f
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error in search_code: {str(e)}")
+        return {
+            "error": str(e),
+            "results": [],
+            "total_results": 0
+        }
+
+
+# Run initialization before starting MCP
+async def main():
+    # Initialize ChromaDB before starting MCP
+    success = await initialize_chromadb()
+
+    if success:
+        # Start indexing in background
+        asyncio.create_task(index_projects())
+        logger.info("Background indexing task started")
+
+    await mcp.run_sse_async()
 
 if __name__ == "__main__":
-    import asyncio
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    asyncio.run(main())
