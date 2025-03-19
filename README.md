@@ -1,6 +1,6 @@
 # Local Code Indexing for Cursor
 
-A Python-based server that provides semantic code search capabilities for your local projects through Cursor IDE. It indexes your source code into ChromaDB using LlamaIndex for document processing and exposes a REST API for semantic search.
+An experimental Python-based server that **locally** indexes codebases using ChromaDB and provides a semantic search tool via an MCP (Model Context Protocol) server for tools like Cursor.
 
 ## Setup
 
@@ -38,7 +38,7 @@ A Python-based server that provides semantic code search capabilities for your l
    {
      "mcpServers": {
        "workspace-code-search": {
-         "url": "http://localhost:8000/sse"
+         "url": "http://localhost:8978/sse"
        }
      }
    }

@@ -4,11 +4,12 @@ services:
   code-indexer:
     build: .
     ports:
-      - "8000:8000"
+      - "8978:8978"
     volumes:
       - ./chroma_db:/app/chroma_db  # Persist ChromaDB data
       - ${PROJECTS_ROOT}:/projects   # Mount projects root directory
     environment:
+      - FASTMCP_PORT=8978
       - PROJECTS_ROOT=/projects
       - FOLDERS_TO_INDEX=${FOLDERS_TO_INDEX}  # Use env variable for folders
     restart: unless-stopped 
