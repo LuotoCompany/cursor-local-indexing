@@ -9,7 +9,9 @@ from chromadb.utils import embedding_functions
 from tree_sitter_language_pack import get_parser
 import asyncio
 from fastmcp import FastMCP
-from contextlib import asynccontextmanager
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from pathlib import Path
 
 # Import LlamaIndex components
 try:
@@ -84,6 +86,74 @@ config = None
 chroma_client = None
 embedding_function = None
 mcp = FastMCP(title="Code Indexer Server")
+observers = []
+
+
+class CodeIndexerEventHandler(FileSystemEventHandler):
+    def __init__(self, folder_name: str):
+        self.folder_name = folder_name
+        self.ignore_dirs = set(config["ignore_dirs"])
+        self.file_extensions = set(config["file_extensions"])
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        if is_valid_file(event.src_path, self.ignore_dirs, self.file_extensions):
+            self._handle_file_change(event.src_path)
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        if is_valid_file(event.src_path, self.ignore_dirs, self.file_extensions):
+            self._handle_file_change(event.src_path)
+
+    def on_deleted(self, event):
+        if event.is_directory:
+            return
+        if is_valid_file(event.src_path, self.ignore_dirs, self.file_extensions):
+            self._handle_file_deletion(event.src_path)
+
+    def _handle_file_change(self, file_path: str):
+        try:
+            # Calculate relative path
+            rel_path = os.path.relpath(file_path, config["projects_root"])
+
+            # Load and process the single file
+            reader = SimpleDirectoryReader(input_files=[file_path])
+            documents = reader.load_data()
+
+            if documents:
+                # Update metadata with relative path
+                documents[0].metadata["file_path"] = rel_path
+
+                # Process and index the document
+                process_and_index_documents(
+                    documents,
+                    self.folder_name,
+                    "chroma_db"
+                )
+                logger.info(f"Indexed updated file: {rel_path}")
+        except Exception as e:
+            logger.error(f"Error processing file {file_path}: {e}")
+
+    def _handle_file_deletion(self, file_path: str):
+        try:
+            # Calculate relative path
+            rel_path = os.path.relpath(file_path, config["projects_root"])
+
+            # Get the collection
+            collection = chroma_client.get_collection(
+                name=self.folder_name,
+                embedding_function=embedding_function
+            )
+
+            # Delete all chunks from this file
+            collection.delete(
+                where={"file_path": rel_path}
+            )
+            logger.info(f"Removed indexed chunks for deleted file: {rel_path}")
+        except Exception as e:
+            logger.error(f"Error removing chunks for {file_path}: {e}")
 
 
 def get_config_from_env():
@@ -431,39 +501,38 @@ def process_and_index_documents(
 
 
 async def index_projects():
-    """Index all configured projects."""
-    while True:
-        try:
-            for folder in config["folders_to_index"]:
-                folder_path = os.path.join(config["projects_root"], folder)
-                if not os.path.exists(folder_path):
-                    logger.error(f"Folder not found: {folder_path}")
-                    continue
+    """Set up file system watchers for all configured projects."""
+    global observers
 
-                logger.info(f"Starting indexing of {folder}")
+    try:
+        for folder in config["folders_to_index"]:
+            folder_path = os.path.join(config["projects_root"], folder)
+            if not os.path.exists(folder_path):
+                logger.error(f"Folder not found: {folder_path}")
+                continue
 
-                # Load documents
-                documents = load_documents(
-                    folder_path,
-                    set(config["ignore_dirs"]),
-                    set(config["file_extensions"])
-                )
+            logger.info(f"Setting up file watcher for {folder}")
 
-                # Process and index documents
-                process_and_index_documents(
-                    documents,
-                    folder,  # Use folder name as collection name
-                    "chroma_db"
-                )
+            # Create an observer and event handler for this folder
+            observer = Observer()
+            event_handler = CodeIndexerEventHandler(folder)
+            observer.schedule(event_handler, folder_path, recursive=True)
 
-                logger.info(f"Completed indexing of {folder}")
+            # Start the observer
+            observer.start()
+            observers.append(observer)
+            logger.info(f"Started watching {folder}")
 
-            # Wait for the configured interval
-            await asyncio.sleep(60)  # Wait a minute before retrying
+        # Keep the main thread alive
+        while True:
+            await asyncio.sleep(1)
 
-        except Exception as e:
-            logger.error(f"Error in indexing loop: {e}")
-            await asyncio.sleep(60)  # Wait a minute before retrying
+    except Exception as e:
+        logger.error(f"Error in file watching setup: {e}")
+        # Clean up observers on error
+        for observer in observers:
+            observer.stop()
+        observers.clear()
 
 
 @mcp.tool(
@@ -522,7 +591,7 @@ async def search_code(
         )
 
         # Filter results by threshold
-        if (not results or not results["documents"] 
+        if (not results or not results["documents"]
                 or not results["documents"][0]):
             return {
                 "error": "No results found",
@@ -583,9 +652,9 @@ async def main():
     success = await initialize_chromadb()
 
     if success:
-        # Start indexing in background
+        # Start file watching in background
         asyncio.create_task(index_projects())
-        logger.info("Background indexing task started")
+        logger.info("File watching task started")
 
     await mcp.run_sse_async()
 
