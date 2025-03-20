@@ -1,13 +1,13 @@
 version: '3.8'
 
 services:
-  code-indexer:
+  code-indexer-mcp:
     build: .
     ports:
       - "8978:8978"
     volumes:
       - ./chroma_db:/app/chroma_db  # Persist ChromaDB data
-      - ${PROJECTS_ROOT}:/projects   # Mount projects root directory
+      - ${PROJECTS_ROOT}:/projects:ro   # Mount projects root directory as read-only with no symlink resolution
       - ./container_cache:/root/.cache  # Mount a cache folder into the container
     environment:
       - FASTMCP_PORT=8978
