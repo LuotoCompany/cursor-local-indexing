@@ -8,6 +8,7 @@ services:
     volumes:
       - ./chroma_db:/app/chroma_db  # Persist ChromaDB data
       - ${PROJECTS_ROOT}:/projects   # Mount projects root directory
+      - ./hf_cache:/root/.cache/huggingface  # Mount Hugging Face cache
     environment:
       - FASTMCP_PORT=8978
       - PROJECTS_ROOT=/projects
