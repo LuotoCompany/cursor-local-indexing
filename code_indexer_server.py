@@ -93,24 +93,40 @@ class CodeIndexerEventHandler(FileSystemEventHandler):
     def __init__(self, folder_name: str):
         self.folder_name = folder_name
         self.ignore_dirs = set(config["ignore_dirs"])
+        self.ignore_files = set(config["ignore_files"])
         self.file_extensions = set(config["file_extensions"])
 
     def on_created(self, event):
         if event.is_directory:
             return
-        if is_valid_file(event.src_path, self.ignore_dirs, self.file_extensions):
+        if is_valid_file(
+            event.src_path,
+            self.ignore_dirs,
+            self.file_extensions,
+            self.ignore_files
+        ):
             self._handle_file_change(event.src_path)
 
     def on_modified(self, event):
         if event.is_directory:
             return
-        if is_valid_file(event.src_path, self.ignore_dirs, self.file_extensions):
+        if is_valid_file(
+            event.src_path,
+            self.ignore_dirs,
+            self.file_extensions,
+            self.ignore_files
+        ):
             self._handle_file_change(event.src_path)
 
     def on_deleted(self, event):
         if event.is_directory:
             return
-        if is_valid_file(event.src_path, self.ignore_dirs, self.file_extensions):
+        if is_valid_file(
+            event.src_path,
+            self.ignore_dirs,
+            self.file_extensions,
+            self.ignore_files
+        ):
             self._handle_file_deletion(event.src_path)
 
     def _handle_file_change(self, file_path: str):
@@ -162,6 +178,25 @@ def get_config_from_env():
     folders_to_index = os.getenv("FOLDERS_TO_INDEX", "").split(",")
     folders_to_index = [f.strip() for f in folders_to_index if f.strip()]
 
+    # Get additional ignore dirs and files from environment
+    additional_ignore_dirs = os.getenv(
+        "ADDITIONAL_IGNORE_DIRS", ""
+    ).split(",")
+    additional_ignore_dirs = [
+        d.strip() for d in additional_ignore_dirs if d.strip()
+    ]
+
+    additional_ignore_files = os.getenv(
+        "ADDITIONAL_IGNORE_FILES", ""
+    ).split(",")
+    additional_ignore_files = [
+        f.strip() for f in additional_ignore_files if f.strip()
+    ]
+
+    # Combine default and additional ignore patterns
+    ignore_dirs = list(DEFAULT_IGNORE_DIRS | set(additional_ignore_dirs))
+    ignore_files = list(DEFAULT_IGNORE_FILES | set(additional_ignore_files))
+
     if not folders_to_index:
         logger.warning("No folders specified to index. Using root directory.")
         folders_to_index = [""]
@@ -169,7 +204,8 @@ def get_config_from_env():
     return {
         "projects_root": projects_root,
         "folders_to_index": folders_to_index,
-        "ignore_dirs": list(DEFAULT_IGNORE_DIRS),
+        "ignore_dirs": ignore_dirs,
+        "ignore_files": ignore_files,
         "file_extensions": list(DEFAULT_FILE_EXTENSIONS)
     }
 
@@ -197,7 +233,7 @@ async def initialize_chromadb():
             )
         )
         logger.info("Embedding function initialized")
-        
+
         return True
     except Exception as e:
         logger.error(f"Error during initialization: {e}")
@@ -230,7 +266,8 @@ async def initialize_chromadb():
 def is_valid_file(
     file_path: str,
     ignore_dirs: Set[str],
-    file_extensions: Set[str]
+    file_extensions: Set[str],
+    ignore_files: Set[str] = None
 ) -> bool:
     """Check if a file should be processed based on its path and extension."""
     # Check if path contains ignored directory
@@ -242,12 +279,15 @@ def is_valid_file(
     # Get file name and check against ignored files
     file_name = os.path.basename(file_path)
 
+    # Use provided ignore_files or fall back to default
+    files_to_ignore = ignore_files if ignore_files is not None else DEFAULT_IGNORE_FILES
+
     # Check exact matches
-    if file_name in DEFAULT_IGNORE_FILES:
+    if file_name in files_to_ignore:
         return False
 
     # Check wildcard patterns
-    for pattern in DEFAULT_IGNORE_FILES:
+    for pattern in files_to_ignore:
         if pattern.startswith("*"):
             if file_name.endswith(pattern[1:]):
                 return False
@@ -260,7 +300,8 @@ def is_valid_file(
 def load_documents(
     directory: str, 
     ignore_dirs: Set[str] = DEFAULT_IGNORE_DIRS,
-    file_extensions: Set[str] = DEFAULT_FILE_EXTENSIONS
+    file_extensions: Set[str] = DEFAULT_FILE_EXTENSIONS,
+    ignore_files: Set[str] = None
 ) -> List[Document]:
     """Load documents from a directory, filtering out ignored paths."""
     try:
@@ -275,7 +316,12 @@ def load_documents(
 
             for file in files:
                 abs_file_path = os.path.join(root, file)
-                if is_valid_file(abs_file_path, ignore_dirs, file_extensions):
+                if is_valid_file(
+                    abs_file_path,
+                    ignore_dirs,
+                    file_extensions,
+                    ignore_files
+                ):
                     # Calculate relative path from the directory being indexed
                     rel_file_path = os.path.relpath(abs_file_path, directory)
                     all_files.append((abs_file_path, rel_file_path))
