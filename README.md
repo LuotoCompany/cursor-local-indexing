@@ -1,13 +1,13 @@
-# Local Code Indexing for AI Coding Assistants
+# Local Code Indexing MCP: Semantic Code Search for AI Assistants
 
-An experimental Python-based server that **locally** indexes codebases using ChromaDB and provides a semantic search tool via an MCP (Model Context Protocol) server for tools like Cursor IDE and Claude Code CLI.
+An experimental Python-based server that **locally** indexes codebases using ChromaDB and provides a semantic search tool via the MCP (Model Context Protocol) for AI coding assistants like Cursor IDE and Claude Code CLI.
 
 ## Setup for Cursor IDE
 
 1. Clone and enter the repository:
    ```bash
    git clone <repository-url>
-   cd cursor-local-indexing
+   cd local-indexing-mcp
    ```
 
 2. Create a `.env` file by copying `.env.example`:
@@ -97,8 +97,8 @@ When integrated with either Cursor IDE or Claude Code CLI, the AI assistant gain
 ## Troubleshooting
 
 - If you're having connection issues, make sure the indexing server is running: `docker-compose ps`
-- Check the logs for any errors: `docker-compose logs code-indexer`
-- Verify your projects are being indexed correctly: `docker-compose logs -f code-indexer`
+- Check the logs for any errors: `docker-compose logs code-indexer-mcp`
+- Verify your projects are being indexed correctly: `docker-compose logs -f code-indexer-mcp`
 - If using Claude Code CLI, ensure the MCP server has been added correctly: `claude mcp get workspace-code-search`
 
 ### Handling Symlinks

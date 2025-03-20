@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  code-indexer:
+  code-indexer-mcp:
     build: .
     ports:
       - "8978:8978"
