@@ -89,9 +89,15 @@ mcp = FastMCP(title="Code Indexer Server")
 observers = []
 
 
+def sanitize_collection_name(folder_name: str) -> str:
+    """Convert folder name to a valid collection name by replacing forward slashes with underscores."""
+    return folder_name.replace("/", "_")
+
+
 class CodeIndexerEventHandler(FileSystemEventHandler):
     def __init__(self, folder_name: str):
         self.folder_name = folder_name
+        self.collection_name = sanitize_collection_name(folder_name)
         self.ignore_dirs = set(config["ignore_dirs"])
         self.ignore_files = set(config["ignore_files"])
         self.file_extensions = set(config["file_extensions"])
@@ -145,7 +151,7 @@ class CodeIndexerEventHandler(FileSystemEventHandler):
                 # Process and index the document
                 process_and_index_documents(
                     documents,
-                    self.folder_name,
+                    self.collection_name,
                     "chroma_db"
                 )
                 logger.info(f"Indexed updated file: {rel_path}")
@@ -159,7 +165,7 @@ class CodeIndexerEventHandler(FileSystemEventHandler):
 
             # Get the collection
             collection = chroma_client.get_collection(
-                name=self.folder_name,
+                name=self.collection_name,
                 embedding_function=embedding_function
             )
 
@@ -546,17 +552,61 @@ def process_and_index_documents(
     )
 
 
+async def perform_initial_indexing(folder: str) -> bool:
+    """Check if collection exists and perform initial indexing if needed."""
+    try:
+        folder_path = os.path.join(config["projects_root"], folder)
+        if not os.path.exists(folder_path):
+            logger.error(f"Folder not found: {folder_path}")
+            return False
+
+        collection_name = sanitize_collection_name(folder)
+
+        # Check if collection exists
+        try:
+            chroma_client.get_collection(
+                name=collection_name,
+                embedding_function=embedding_function
+            )
+            logger.info(f"Collection {collection_name} already exists, skipping initial indexing")
+            return True
+        except Exception:
+            logger.info(f"Collection {collection_name} not found, performing initial indexing")
+
+        # Load and process all documents in the folder
+        documents = load_documents(
+            folder_path,
+            ignore_dirs=set(config["ignore_dirs"]),
+            file_extensions=set(config["file_extensions"]),
+            ignore_files=set(config["ignore_files"])
+        )
+
+        if documents:
+            process_and_index_documents(documents, collection_name, "chroma_db")
+            logger.info(f"Successfully performed initial indexing for {folder}")
+            return True
+        else:
+            logger.warning(f"No documents found to index in {folder}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error during initial indexing of {folder}: {e}")
+        return False
+
+
 async def index_projects():
     """Set up file system watchers for all configured projects."""
     global observers
 
     try:
         for folder in config["folders_to_index"]:
-            folder_path = os.path.join(config["projects_root"], folder)
-            if not os.path.exists(folder_path):
-                logger.error(f"Folder not found: {folder_path}")
+            # First perform initial indexing if needed
+            success = await perform_initial_indexing(folder)
+            if not success:
+                logger.error(f"Failed to perform initial indexing for {folder}")
                 continue
 
+            folder_path = os.path.join(config["projects_root"], folder)
             logger.info(f"Setting up file watcher for {folder}")
 
             # Create an observer and event handler for this folder
@@ -599,88 +649,74 @@ async def search_code(
     threshold: float = 30.0
 ):
     try:
-        if not chroma_client:
-            logger.error("ChromaDB client not initialized")
+        if not chroma_client or not embedding_function:
+            logger.error("ChromaDB client or embedding function not initialized")
             return {
-                "error": "ChromaDB client not initialized",
+                "error": "Search system not properly initialized",
                 "results": [],
                 "total_results": 0
             }
 
-        if not embedding_function:
-            logger.error("Embedding function not initialized")
+        # Get all collections
+        collection_names = chroma_client.list_collections()
+
+        # Find matching collections
+        matching_collections = []
+        project_name = project.lower()
+        for collection_name in collection_names:
+            # The collection name might be in format "customerX_project1" or just "project1"
+            # We want to match if project_name fully matches the part after the last _ (if any)
+            collection_parts = collection_name.lower().split('_')
+            if collection_parts[-1] == project_name:
+                matching_collections.append(collection_name)
+
+        if not matching_collections:
+            logger.error(f"No collections found matching project {project}")
             return {
-                "error": "Embedding function not initialized",
+                "error": f"No collections found matching project {project}",
                 "results": [],
                 "total_results": 0
             }
 
-        # Check if collection exists
-        try:
-            collection = chroma_client.get_collection(
-                name=project,
-                embedding_function=embedding_function
+        # Search in all matching collections and combine results
+        all_results = []
+
+        for collection_name in matching_collections:
+            collection = chroma_client.get_collection(collection_name)
+
+            results = collection.query(
+                query_texts=[query],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"]
             )
-        except Exception as e:
-            logger.error(f"Collection {project} not found: {e}")
-            return {
-                "error": f"Collection {project} not found",
-                "results": [],
-                "total_results": 0
-            }
 
-        # Perform the search
-        results = collection.query(
-            query_texts=[query],
-            n_results=n_results,
-            include=["documents", "metadatas", "distances"]
-        )
+            if results["documents"] and results["documents"][0]:
+                for doc, meta, distance in zip(
+                    results["documents"][0],
+                    results["metadatas"][0],
+                    results["distances"][0]
+                ):
+                    similarity = (1 - distance) * 100
+                    if similarity >= threshold:
+                        all_results.append({
+                            "text": doc,
+                            "file_path": meta.get("file_path", "Unknown file"),
+                            "language": meta.get("language", "text"),
+                            "start_line": int(meta.get("start_line", 0)),
+                            "end_line": int(meta.get("end_line", 0)),
+                            "relevance": round(similarity, 1),
+                            "collection": collection.name  # Add collection name for debugging
+                        })
 
-        # Filter results by threshold
-        if (not results or not results["documents"]
-                or not results["documents"][0]):
-            return {
-                "error": "No results found",
-                "results": [],
-                "total_results": 0
-            }
+        # Sort results by relevance
+        all_results.sort(key=lambda x: x["relevance"], reverse=True)
 
-        filtered_docs = []
-        filtered_metadatas = []
-        filtered_distances = []
-
-        for doc, meta, distance in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0]
-        ):
-            # Convert distance to similarity percentage
-            similarity = (1 - distance) * 100
-
-            # Only include results above threshold
-            if similarity >= threshold:
-                filtered_docs.append(doc)
-                filtered_metadatas.append(meta)
-                filtered_distances.append(distance)
-
-        # Format results
-        formatted_results = []
-        for doc, meta, distance in zip(
-            filtered_docs, filtered_metadatas, filtered_distances
-        ):
-            score = (1 - distance) * 100
-            formatted_results.append({
-                "text": doc,
-                "file_path": meta.get("file_path", "Unknown file"),
-                "language": meta.get("language", "text"),
-                "start_line": int(meta.get("start_line", 0)),
-                "end_line": int(meta.get("end_line", 0)),
-                "relevance": round(score, 1)
-            })
+        # Take top n_results
+        final_results = all_results[:n_results]
 
         return {
-            "results": formatted_results,
-            "total_results": len(formatted_results)
+            "results": final_results,
+            "total_results": len(final_results)
         }
 
     except Exception as e:
