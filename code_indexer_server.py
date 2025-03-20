@@ -410,7 +410,7 @@ def process_and_index_documents(
                 metadatas.append(metadata)
 
             # Add nodes to ChromaDB collection
-            collection.add(
+            collection.upsert(
                 ids=ids,
                 documents=texts,
                 metadatas=metadatas
