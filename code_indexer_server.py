@@ -310,11 +310,14 @@ def load_documents(
     file_extensions: Set[str] = DEFAULT_FILE_EXTENSIONS,
     ignore_files: Set[str] = None
 ) -> List[Document]:
-    """Load documents from a directory, filtering out ignored paths."""
+    """
+    Load documents from a directory, filtering out ignored paths.
+    Uses os.walk with followlinks=False to avoid following symbolic links.
+    """
     try:
-        # Get all files recursively
+        # Get all files recursively - DO NOT follow symlinks
         all_files = []
-        for root, dirs, files in os.walk(directory):
+        for root, dirs, files in os.walk(directory, followlinks=False):
             # Skip ignored directories
             dirs[:] = [
                 d for d in dirs
@@ -323,6 +326,11 @@ def load_documents(
 
             for file in files:
                 abs_file_path = os.path.join(root, file)
+
+                # Skip symlinks completely to avoid issues
+                if os.path.islink(abs_file_path):
+                    continue
+
                 if is_valid_file(
                     abs_file_path,
                     ignore_dirs,
