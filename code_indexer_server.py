@@ -2,6 +2,7 @@
 
 import os
 import logging
+import json
 from typing import List, Set
 import chromadb
 from chromadb.config import Settings
@@ -11,7 +12,7 @@ import asyncio
 from fastmcp import FastMCP
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from pathlib import Path
+
 
 # Import LlamaIndex components
 try:
@@ -647,15 +648,15 @@ async def search_code(
     project: str,
     n_results: int = 5,
     threshold: float = 30.0
-):
+) -> str:
     try:
         if not chroma_client or not embedding_function:
             logger.error("ChromaDB client or embedding function not initialized")
-            return {
+            return json.dumps({
                 "error": "Search system not properly initialized",
                 "results": [],
                 "total_results": 0
-            }
+            })
 
         # Get all collections
         collection_names = chroma_client.list_collections()
@@ -672,11 +673,11 @@ async def search_code(
 
         if not matching_collections:
             logger.error(f"No collections found matching project {project}")
-            return {
+            return json.dumps({
                 "error": f"No collections found matching project {project}",
                 "results": [],
                 "total_results": 0
-            }
+            })
 
         # Search in all matching collections and combine results
         all_results = []
@@ -714,18 +715,18 @@ async def search_code(
         # Take top n_results
         final_results = all_results[:n_results]
 
-        return {
+        return json.dumps({
             "results": final_results,
             "total_results": len(final_results)
-        }
+        })
 
     except Exception as e:
         logger.error(f"Error in search_code: {str(e)}")
-        return {
+        return json.dumps({
             "error": str(e),
             "results": [],
             "total_results": 0
-        }
+        })
 
 
 # Run initialization before starting MCP

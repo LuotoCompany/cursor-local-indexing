@@ -3,4 +3,4 @@ __pycache__/
 .venv/
 .DS_Store
 chroma_db/
-hf_cache/
+container_cache/
